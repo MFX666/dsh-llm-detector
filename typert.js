@@ -38,12 +38,17 @@ function codec(typeSymbol, description, parse) {
 // --- wire payloads -----------------------------------------------------------
 
 export function parseStartInput(value) {
-  const input = exactObject(value, ['provider', 'model'], 'start input')
+  const input = exactObject(value, ['provider', 'model', 'concurrency'], 'start input')
   // Empty route means "use the host's current default model selection".
-  return {
+  const out = {
     provider: input.provider === undefined || input.provider === '' ? '' : nonEmptyString(input.provider, 'provider', MAX_NAME),
     model: input.model === undefined || input.model === '' ? '' : nonEmptyString(input.model, 'model', MAX_NAME),
   }
+  if (input.concurrency !== undefined) {
+    if (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 6) throw new TypeError('concurrency must be an integer 1..6')
+    out.concurrency = input.concurrency
+  }
+  return out
 }
 
 export function parseStatusInput(value) {
@@ -90,6 +95,13 @@ export function parseRoutesResult(value) {
 export function parseRunIdResult(value) {
   const result = exactObject(value, ['runId'], 'result')
   return { runId: nonEmptyString(result.runId, 'runId', MAX_ID) }
+}
+
+export function parseRunsResult(value) {
+  const result = exactObject(value, ['runs'], 'runs result')
+  if (!Array.isArray(result.runs)) throw new TypeError('runs must be an array')
+  if (result.runs.length > 100) throw new TypeError('too many runs')
+  return { runs: result.runs.map((item, index) => parseStatusResult(item)) }
 }
 
 const STATES = ['idle', 'loading_data', 'sampling', 'analyzing', 'completed', 'failed', 'cancelled']
@@ -195,6 +207,7 @@ export const START_RESULT = codec(`${PKG}#StartResult`, 'The accepted run id.', 
 export const CANCEL_RESULT = codec(`${PKG}#CancelResult`, 'The cancelled run id.', parseRunIdResult)
 export const STATUS_RESULT = codec(`${PKG}#StatusResult`, 'One snapshot of the detector run.', parseStatusResult)
 export const ROUTES_RESULT = codec(`${PKG}#RoutesResult`, 'Model routes the detector can probe.', parseRoutesResult)
+export const RUNS_RESULT = codec(`${PKG}#RunsResult`, 'Finished detection runs, newest first.', parseRunsResult)
 
 const startDescriptor = inputParameter('Provider route and model id to probe.')
 startDescriptor.codec = START_INPUT
@@ -204,6 +217,8 @@ const cancelDescriptor = inputParameter('The run id to cancel.')
 cancelDescriptor.codec = CANCEL_INPUT
 const routesDescriptor = inputParameter('List the model routes available for detection.', true)
 routesDescriptor.codec = codec(`${PKG}#RoutesInput`, 'Empty request.', parseRoutesInput)
+const runsDescriptor = inputParameter('List past detection runs.', true)
+runsDescriptor.codec = codec(`${PKG}#RunsInput`, 'Empty request.', parseRoutesInput)
 
 export const TYPERT = {
   package: PKG,
@@ -254,6 +269,17 @@ export const TYPERT = {
       parameters: [routesDescriptor],
       cancellation: { parameter: 'signal' },
       result: ROUTES_RESULT,
+    },
+    {
+      id: `${PKG}#${NS}/listRuns`,
+      service: NS,
+      namespace: NS,
+      method: 'listRuns',
+      description: 'List past detection runs, newest first, with their full snapshots.',
+      invocation: { kind: 'direct' },
+      parameters: [runsDescriptor],
+      cancellation: { parameter: 'signal' },
+      result: RUNS_RESULT,
     },
   ],
 }

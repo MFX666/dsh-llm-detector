@@ -18,6 +18,10 @@ window.__ModuleLoader__.load({
       title: 'LMFPD 模型检测',
       intro: '用 3 道计数挑战题判断当前配置的模型是否为 LMFPD 库内已知模型。仅对本 DSH 实例已配置的 Provider 路由发起请求，不会发送任何密钥或页面数据。',
       choose_model: '选择模型',
+      concurrency: '采样方式',
+      concurrency_serial: '串行（一道一道问）',
+      concurrency_parallel: '并行（3 道同时问，更快）',
+      history: '历史记录',
       default_model: '默认模型',
       settings_entry: '模型检测',
       settings_entry_hint: '用计数挑战题识别当前模型，查看是否命中参考库',
@@ -61,6 +65,10 @@ window.__ModuleLoader__.load({
       title: 'LMFPD model detector',
       intro: 'Probes whether the configured model is an LMFPD-listed model with 3 counting challenges. Requests only the provider routes this DSH instance already configured; no keys or page data are sent.',
       choose_model: 'Model',
+      concurrency: 'Sampling',
+      concurrency_serial: 'Serial (one at a time)',
+      concurrency_parallel: 'Parallel (3 at once, faster)',
+      history: 'History',
       default_model: 'Default model',
       settings_entry: 'Model detection',
       settings_entry_hint: 'Identify the current model with counting challenges against a reference bank',
@@ -129,6 +137,7 @@ window.__ModuleLoader__.load({
       descriptor('status', 'Read the current run snapshot.', true),
       descriptor('cancel', 'Cancel the run with the given id.'),
       descriptor('listRoutes', 'List probe-able model routes and the default selection.', true),
+      descriptor('listRuns', 'List past detection runs, newest first.', true),
     ]
 
     const DECISION_KEYS = {
@@ -185,6 +194,7 @@ window.__ModuleLoader__.load({
         try { localStorage.setItem(ROUTE_STORAGE_KEY, value) } catch { }
         setRouteKeyState(value)
       }
+      const [concurrency, setConcurrency] = useState(1)
       const [routes, setRoutes] = useState(undefined)
       const [snapshot, setSnapshot] = useState(undefined)
       const [busyStarting, setBusyStarting] = useState(false)
@@ -219,6 +229,17 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer)
       }, [snapshot, refresh])
 
+      // History: past runs, newest first; reloaded when a run settles.
+      const [history, setHistory] = useState(undefined)
+      const settledRunId = snapshot !== undefined && !ACTIVE_STATES.has(snapshot.state) ? snapshot.runId : undefined
+      useEffect(() => {
+        let alive = true
+        void api.listRuns({}).then(result => {
+          if (alive && result.ok) setHistory(result.value.runs)
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [api, settledRunId])
+
       // Model catalog for the picker; failure leaves just the default option.
       useEffect(() => {
         let alive = true
@@ -246,7 +267,7 @@ window.__ModuleLoader__.load({
         setError(undefined)
         try {
           const [provider, model] = routeKey === '' ? ['', ''] : routeKey.split('|')
-          const result = await api.start({ provider, model })
+          const result = await api.start({ provider, model, concurrency })
           if (!result.ok) {
             const issue = result.error.details?.issues?.[0]
             setError(issue?.code === 'busy' ? t('busy') : `${t('start_failed')}: ${result.error.message}`)
@@ -277,6 +298,11 @@ window.__ModuleLoader__.load({
           h('label', { style: styles.field },
             h('span', null, t('choose_model')),
             h('select', { value: routeKey, onChange: e => setRouteKey(e.target.value), style: styles.input, disabled: active }, ...options)),
+          h('label', { style: styles.field },
+            h('span', null, t('concurrency')),
+            h('select', { value: String(concurrency), onChange: e => setConcurrency(Number(e.target.value)), style: styles.input, disabled: active },
+              h('option', { value: '1' }, t('concurrency_serial')),
+              h('option', { value: '3' }, t('concurrency_parallel')))),
           h('div', { style: styles.actions },
             active
               ? h('button', { onClick: () => { void cancel() }, style: styles.secondary }, t('cancel'))
@@ -288,7 +314,37 @@ window.__ModuleLoader__.load({
           h('p', { style: styles.cost }, t('cost'))),
         error !== undefined && h('div', { role: 'alert', style: styles.error }, error),
         h(ResultView, { t, snapshot }),
+        h(HistoryView, { t, history, excludeRunId: snapshot?.runId }),
       )
+    }
+
+    function HistoryView({ t, history, excludeRunId }) {
+      if (history === undefined) return null
+      const runs = history.filter(run => run.runId !== excludeRunId)
+      if (runs.length === 0) return null
+      return h('div', { style: styles.block },
+        SectionTitle(t('history')),
+        runs.map(run => {
+          const result = run.result
+          const decision = result?.decision
+          const tone = DECISION_TONE[decision] ?? 'var(--dsw-alias-label-tertiary)'
+          const label = decision === undefined ? t(run.state) : (DECISION_KEYS[decision] === undefined ? decision : t(DECISION_KEYS[decision]))
+          const time = run.startedAt === undefined ? '' : new Date(run.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          return h('details', { key: run.runId, style: styles.question },
+            h('summary', { style: styles.questionSummary },
+              h('span', { style: { ...styles.questionDot, background: tone } }),
+              h('span', { style: styles.questionLabel }, `${time} · ${run.model}${run.provider === undefined ? '' : ` · ${run.provider}`}`),
+              h('span', { style: { ...styles.chip, background: tone, color: '#fff', border: 'none' } }, label)),
+            result !== undefined && h('div', { style: { padding: '0 10px 10px' } },
+              result.predictionName !== undefined && h('div', { style: { ...styles.predictionName, fontSize: 16 } }, result.predictionName),
+              result.error !== undefined && h('div', { style: { ...styles.verdictSub, color: 'var(--dsw-alias-state-error-primary)' } }, result.error),
+              (result.candidates ?? []).slice(0, 3).map((candidate, index) => h('div', {
+                key: candidate.model, style: { ...styles.verdictSub, display: 'flex', justifyContent: 'space-between', marginTop: 2 },
+              },
+                h('span', null, `${index + 1}. ${candidate.modelName ?? candidate.model}`),
+                h('span', { style: { fontVariantNumeric: 'tabular-nums' } }, candidate.score.toFixed(3)))),
+              result.usage !== undefined && h('div', { style: { ...styles.usageLine, marginTop: 4 } }, formatUsage(result.usage))))
+        }))
     }
 
     // Keyframes for the running indicator and meter transitions; inline styles
@@ -467,6 +523,7 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
         async start(input) { return ns().start(input) },
         async cancel(input) { return ns().cancel(input) },
         async listRoutes(input) { return ns().listRoutes(input ?? {}) },
+        async listRuns(input) { return ns().listRuns(input ?? {}) },
       }
     }
 

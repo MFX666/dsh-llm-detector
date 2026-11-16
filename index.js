@@ -2,11 +2,17 @@
 // One detection run at a time; in-memory only. lmfpd-sdk owns scoring, this
 // service owns sampling through ctx.llm and the single-run state machine.
 import { randomUUID } from 'node:crypto'
+import { appendFile, readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 const QUESTION_TIMEOUT_MS = 120_000
 const QUESTION_COUNT = 3
+const HISTORY_CAP = 30
+// Env override keeps tests off the real user history file.
+const HISTORY_FILE = process.env.LLM_DETECTOR_HISTORY ?? join(homedir(), '.dsh', 'llm-detector-runs.jsonl')
 
 // Number-counting challenges never need temperature tuning; provider defaults
 // keep the sample representative of the configured model's ordinary behavior.
@@ -23,6 +29,9 @@ export default class LlmDetectorService extends TypertRemoteService {
   _active
   /** The latest finished run, kept for status({}) after completion. */
   _last
+  /** Finished runs this process produced or loaded, newest first. */
+  _history = []
+  _historyLoaded = false
   _runCounter = 0
 
   constructor(ctx) {
@@ -51,6 +60,7 @@ export default class LlmDetectorService extends TypertRemoteService {
       runId,
       provider,
       model,
+      concurrency: Math.min(6, Math.max(1, input.concurrency ?? 1)),
       controller,
       startedAt: Date.now(),
       phase: 'loading_data',
@@ -140,6 +150,33 @@ export default class LlmDetectorService extends TypertRemoteService {
     run.phase = undefined
     this._last = run
     this._active = undefined
+    const snapshot = this.status({ runId: run.runId })
+    this._history.unshift(snapshot)
+    if (this._history.length > HISTORY_CAP) this._history.length = HISTORY_CAP
+    // Fire-and-forget persistence: losing a history line must never fail a run.
+    void appendFile(HISTORY_FILE, `${JSON.stringify(snapshot)}\n`, 'utf8').catch(() => { })
+  }
+
+  async listRuns() {
+    if (!this._historyLoaded) {
+      this._historyLoaded = true
+      try {
+        const text = await readFile(HISTORY_FILE, 'utf8')
+        const lines = text.split('\n').filter(line => line !== '')
+        const past = []
+        for (const line of lines) {
+          try { past.push(JSON.parse(line)) } catch { }
+        }
+        const seen = new Set(this._history.map(run => run.runId))
+        for (const run of past.reverse()) {
+          if (!seen.has(run.runId)) this._history.push(run)
+        }
+        if (this._history.length > HISTORY_CAP) this._history.length = HISTORY_CAP
+      } catch {
+        // First run ever, or a lost file: history is best-effort.
+      }
+    }
+    return { runs: this._history }
   }
 
   async _run(run) {
@@ -161,26 +198,47 @@ export default class LlmDetectorService extends TypertRemoteService {
     const questions = []
     const outputs = []
     const usage = {}
-    for (let index = 0; index < challenges.length; index++) {
-      run.phase = 'sampling'
-      run.questionIndex = index + 1
-      const challenge = challenges[index]
-      try {
-        const sample = await this._sampleQuestion(run, challenge.prompt)
-        // Each question keeps its own last observed usage snapshot; the run
-        // total sums those finals (disjoint fields, so plain addition is safe).
-        if (sample.usage !== undefined) {
-          for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens']) {
-            if (sample.usage[key] !== undefined) usage[key] = (usage[key] ?? 0) + sample.usage[key]
-          }
+    run.phase = 'sampling'
+    const challenges_length = challenges.length
+    // Worker pool: run.concurrency === 1 keeps the original serial order;
+    // >1 runs questions in parallel, results stay index-ordered.
+    const results = new Array(challenges_length)
+    let next = 0
+    let completed = 0
+    const record = (index, entry) => {
+      results[index] = entry
+      run.questionIndex = ++completed
+    }
+    const worker = async () => {
+      while (next < challenges_length && !run.controller.signal.aborted) {
+        const index = next++
+        const challenge = challenges[index]
+        try {
+          const sample = await this._sampleQuestion(run, challenge.prompt)
+          record(index, {
+            question: { index: index + 1, state: 'ok', text: sample.text, ...(sample.usage === undefined ? {} : { usage: sample.usage }) },
+            output: { text: sample.text, expected_count: challenge.expected_count },
+            usage: sample.usage,
+          })
+        } catch (error) {
+          record(index, {
+            question: { index: index + 1, state: 'failed', error: sanitizeError(error) },
+            output: { text: '', expected_count: challenge.expected_count },
+          })
         }
-        questions.push({ index: index + 1, state: 'ok', text: sample.text, ...(sample.usage === undefined ? {} : { usage: sample.usage }) })
-        outputs.push({ text: sample.text, expected_count: challenge.expected_count })
-      } catch (error) {
-        questions.push({ index: index + 1, state: 'failed', error: sanitizeError(error) })
-        outputs.push({ text: '', expected_count: challenge.expected_count })
       }
-      if (controller.signal.aborted) break
+    }
+    await Promise.all(Array.from({ length: run.concurrency }, worker))
+
+    for (const entry of results) {
+      if (entry === undefined) break
+      questions.push(entry.question)
+      outputs.push(entry.output)
+      if (entry.usage !== undefined) {
+        for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens']) {
+          if (entry.usage[key] !== undefined) usage[key] = (usage[key] ?? 0) + entry.usage[key]
+        }
+      }
     }
 
     if (controller.signal.aborted) {
@@ -299,7 +357,7 @@ function createDetectorTool(service) {
         if (typeof args.provider !== 'string' || typeof args.model !== 'string') {
           throw new Error('action=start requires provider and model')
         }
-        return service.start({ provider: args.provider, model: args.model })
+        return service.start({ provider: args.provider, model: args.model, ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}) })
       }
       if (args.action === 'status') return service.status({ ...(args.runId === undefined ? {} : { runId: args.runId }) })
       if (typeof args.runId !== 'string') throw new Error('action=cancel requires runId')

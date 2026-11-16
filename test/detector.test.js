@@ -5,8 +5,13 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { TYPERT, parseStartInput, parseStatusInput, parseCancelInput, parseRoutesInput, parseRoutesResult } from '../typert.js'
-import Service from '../index.js'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { TYPERT, parseStartInput, parseStatusInput, parseCancelInput, parseRoutesInput, parseRoutesResult, parseRunsResult } from '../typert.js'
+
+process.env.LLM_DETECTOR_HISTORY = join(tmpdir(), `llm-detector-test-${randomUUID().slice(0, 8)}.jsonl`)
+const { default: Service } = await import('../index.js')
 
 // TypertRemoteService extends a real cordis Service, so the fake needs a real
 // Context with the injected services provided as plain values.
@@ -35,7 +40,7 @@ test('TYPERT manifest shape', () => {
   assert.equal(TYPERT.package, '@local/dsh-llm-detector')
   assert.equal(TYPERT.face, 'host')
   assert.deepEqual(TYPERT.model, { services: [], events: [], objects: [] })
-  assert.deepEqual(TYPERT.invocations.map(d => d.method), ['start', 'status', 'cancel', 'listRoutes'])
+  assert.deepEqual(TYPERT.invocations.map(d => d.method), ['start', 'status', 'cancel', 'listRoutes', 'listRuns'])
   for (const d of TYPERT.invocations) {
     assert.equal(d.service, 'llmDetector')
     assert.equal(d.namespace, 'llmDetector')
@@ -81,6 +86,29 @@ test('routes codec: nullable default, named routes', () => {
   assert.throws(() => parseRoutesResult({ default: { provider: 'p' }, routes: [] }))
 })
 
+test('start codec: optional concurrency 1..6', () => {
+  assert.deepEqual(parseStartInput({ provider: '', model: '' }), { provider: '', model: '' })
+  assert.deepEqual(parseStartInput({ provider: 'p', model: 'm', concurrency: 3 }), { provider: 'p', model: 'm', concurrency: 3 })
+  assert.throws(() => parseStartInput({ provider: 'p', model: 'm', concurrency: 0 }))
+  assert.throws(() => parseStartInput({ provider: 'p', model: 'm', concurrency: 2.5 }))
+  assert.throws(() => parseStartInput({ provider: 'p', model: 'm', concurrency: 7 }))
+})
+
+test('runs codec: array of status snapshots', () => {
+  const snapshot = {
+    state: 'completed',
+    runId: 'run-1-abc',
+    provider: 'p',
+    model: 'm',
+    startedAt: 1,
+    finishedAt: 2,
+    result: { decision: 'scored', prediction: 'x', predictionName: 'X', candidates: [{ model: 'x', score: 1, probability: null }], questions: [{ index: 1, state: 'ok' }, { index: 2, state: 'ok' }, { index: 3, state: 'ok' }], probability: 0.5 },
+  }
+  assert.deepEqual(parseRunsResult({ runs: [snapshot] }).runs.length, 1)
+  assert.throws(() => parseRunsResult({ runs: 'no' }))
+  assert.throws(() => parseRunsResult({ runs: [{ state: 'bogus' }] }))
+})
+
 test('full run: start → sampling → completed with result', async () => {
   const ctx = fakeCtx({ stream: fakeStream(['1 2 3', ' 42', 'x']) })
   const svc = new Service(ctx, {})
@@ -103,6 +131,25 @@ test('full run: start → sampling → completed with result', async () => {
   assert.equal(snap.result.usage.inputTokens, 33) // 11 × 3 questions
   // status() without runId also returns the last terminal run
   assert.equal(svc.status({}).state, 'completed')
+
+  // Parallel variant: pool must preserve question order and sum the same usage.
+  const ctx3 = fakeCtx({ stream: fakeStream(['1 2 3', ' 42', 'x']) })
+  const svc3 = new Service(ctx3, {})
+  const started3 = svc3.start({ provider: 'p', model: 'm', concurrency: 3 })
+  let snap3
+  for (let i = 0; i < 100; i++) {
+    snap3 = svc3.status({ runId: started3.runId })
+    if (snap3.state === 'completed' || snap3.state === 'failed' || snap3.state === 'cancelled') break
+    await flush(100)
+  }
+  assert.equal(snap3.state, 'completed')
+  assert.deepEqual(snap3.result.questions.map(q => q.index), [1, 2, 3])
+  assert.equal(snap3.result.usage.inputTokens, 33)
+
+  // History: the settled runs are listed newest first.
+  const runs = await svc3.listRuns()
+  assert.equal(runs.runs[0].runId, started3.runId)
+  assert.equal(runs.runs[1].runId, started.runId)
 })
 
 test('busy then cancel', async () => {
