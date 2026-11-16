@@ -174,8 +174,17 @@ window.__ModuleLoader__.load({
       return parts.join(' / ')
     }
 
+    const ROUTE_STORAGE_KEY = 'dsh-llm-detector.route'
+
     function Page({ t, api }) {
-      const [routeKey, setRouteKey] = useState('')
+      // Selection survives panel switches: React state dies on unmount.
+      const [routeKey, setRouteKeyState] = useState(() => {
+        try { return localStorage.getItem(ROUTE_STORAGE_KEY) ?? '' } catch { return '' }
+      })
+      const setRouteKey = (value) => {
+        try { localStorage.setItem(ROUTE_STORAGE_KEY, value) } catch { }
+        setRouteKeyState(value)
+      }
       const [routes, setRoutes] = useState(undefined)
       const [snapshot, setSnapshot] = useState(undefined)
       const [busyStarting, setBusyStarting] = useState(false)
@@ -282,69 +291,121 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // Keyframes for the running indicator and meter transitions; inline styles
+    // cannot express @keyframes.
+    const STYLE_SHEET = `
+@keyframes llmdet-pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+@keyframes llmdet-sweep { from { transform: translateX(-100%) } to { transform: translateX(240%) } }
+summary::-webkit-details-marker { display: none } summary { list-style: none }
+`
+
+    const DECISION_TONE = {
+      scored: 'var(--dsw-alias-state-success-secondary)',
+      partial: 'var(--dsw-alias-state-warn-label)',
+      unscorable: 'var(--dsw-alias-label-tertiary)',
+      not_model: 'var(--dsw-alias-label-tertiary)',
+      error: 'var(--dsw-alias-state-error-primary)',
+    }
+
     function ResultView({ t, snapshot }) {
       if (snapshot === undefined || snapshot.state === 'idle') {
         return h('p', { style: styles.hint }, t('idle_hint'))
       }
-      const children = []
-      if (snapshot.state === 'loading_data') children.push(h('p', { 'aria-live': 'polite', style: styles.phase }, t('phase_loading_data')))
-      if (snapshot.state === 'sampling') children.push(h('p', { 'aria-live': 'polite', style: styles.phase }, t('phase_sampling').replace('{index}', String(snapshot.questionIndex ?? ''))))
-      if (snapshot.state === 'analyzing') children.push(h('p', { 'aria-live': 'polite', style: styles.phase }, t('phase_analyzing')))
-      if (snapshot.state === 'completed' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
-        children.push(h('p', { style: styles.phase }, t(snapshot.state)))
-        const result = snapshot.result
-        if (result !== undefined) {
-          if (result.decision !== 'error' && result.predictionName !== undefined) {
-            const key = DECISION_KEYS[result.decision]
-            children.push(h('div', { style: styles.verdict }, [
-              h('span', { style: styles.badge, key: 'badge' }, key === undefined ? result.decision : t(key)),
-              h('span', { key: 'pred' }, `${t('prediction')}: ${result.predictionName} (${t('configured_model')}: ${snapshot.model})`),
-            ]))
-            if (result.familyPredictionName !== undefined) {
-              children.push(h('p', { style: styles.line }, `${t('family')}: ${result.familyPredictionName}`))
-            }
-            const probability = result.probability
-            children.push(h('p', { style: styles.line },
-              probability === null || probability === undefined
-                ? t('no_probability')
-                : `${t('prob_ref')}: ${(probability * 100).toFixed(1)}%`))
-          }
-          if (result.error !== undefined) {
-            children.push(h('div', { role: 'alert', style: styles.error }, `${t('error')}: ${result.error}`))
-          }
-          const candidates = result.candidates ?? []
-          if (candidates.length > 0) {
-            children.push(h('h3', { style: styles.sectionTitle }, t('candidates')))
-            children.push(h('table', { style: styles.table },
+      const children = [h('style', { key: 'llmdet-css' }, STYLE_SHEET)]
+      const running = ACTIVE_STATES.has(snapshot.state)
+      if (running) {
+        children.push(h('div', { 'aria-live': 'polite', style: styles.running },
+          h('span', { style: styles.runningDot }),
+          h('span', null, snapshot.state === 'loading_data'
+            ? t('phase_loading_data')
+            : snapshot.state === 'sampling'
+              ? t('phase_sampling').replace('{index}', String(snapshot.questionIndex ?? ''))
+              : t('phase_analyzing'))))
+        return h('section', { 'aria-live': 'polite' }, ...children)
+      }
+      children.push(h('div', { style: styles.verdictCard }, VerdictBody({ t, snapshot })))
+      const result = snapshot.result
+      if (result !== undefined) {
+        if (result.error !== undefined) {
+          children.push(h('div', { role: 'alert', style: styles.error }, `${t('error')}: ${result.error}`))
+        }
+        const candidates = result.candidates ?? []
+        if (candidates.length > 0) {
+          children.push(h('div', { style: styles.block }, SectionTitle(t('candidates'))))
+          children.push(h('div', { style: styles.tableCard },
+            h('table', { style: styles.table },
               h('thead', null, h('tr', null,
                 h('th', { style: styles.th }, '#'),
                 h('th', { style: styles.th }, t('configured_model')),
                 h('th', { style: styles.th }, t('family')),
-                h('th', { style: styles.th }, t('score')))),
-              h('tbody', null, candidates.slice(0, 5).map((candidate, index) => h('tr', { key: candidate.model },
-                h('td', { style: styles.td }, String(index + 1)),
-                h('td', { style: styles.td }, candidate.modelName ?? candidate.model),
-                h('td', { style: styles.td }, candidate.familyName ?? ''),
-                h('td', { style: styles.td }, candidate.score.toFixed(3)))))))
-          }
-          const questions = result.questions ?? []
-          if (questions.length > 0) {
-            children.push(h('h3', { style: styles.sectionTitle }, t('questions')))
-            for (const question of questions) {
-              children.push(h('details', { key: question.index, style: styles.question },
-                h('summary', null, `#${question.index} — ${question.state === 'ok' ? t('q_ok') : `${t('q_failed')}${question.error === undefined ? '' : `: ${question.error}`}`}`),
-                question.text !== undefined && h('pre', { style: styles.reply }, question.text),
-                question.usage !== undefined && h('p', { style: styles.usageLine }, `${t('usage')}: ${formatUsage(question.usage)}`)))
-            }
-          }
-          const usage = formatUsage(result.usage)
-          if (usage !== null) children.push(h('p', { style: styles.usageLine }, `${t('usage')}: ${usage}`))
+                h('th', { style: { ...styles.th, textAlign: 'right' } }, t('score')))),
+              h('tbody', null, candidates.slice(0, 5).map((candidate, index) => h('tr', { key: candidate.model, style: index === 0 ? styles.rowBest : undefined },
+                h('td', { style: index === 0 ? { ...styles.td, ...styles.rankBest } : styles.td }, String(index + 1)),
+                h('td', { style: index === 0 ? { ...styles.td, fontWeight: 600 } : styles.td }, candidate.modelName ?? candidate.model),
+                h('td', { style: { ...styles.td, color: 'var(--dsw-alias-label-secondary)' } }, candidate.familyName ?? ''),
+                h('td', { style: { ...styles.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: index === 0 ? 'var(--dsw-alias-state-success-secondary)' : undefined, fontWeight: index === 0 ? 700 : 400 } }, candidate.score.toFixed(3))))))))
         }
+        const questions = result.questions ?? []
+        if (questions.length > 0) {
+          children.push(h('div', { style: styles.block }, SectionTitle(t('questions'))))
+          for (const question of questions) {
+            const ok = question.state === 'ok'
+            children.push(h('details', { key: question.index, style: styles.question },
+              h('summary', { style: styles.questionSummary },
+                h('span', { style: { ...styles.questionDot, background: ok ? 'var(--dsw-alias-state-success-secondary)' : 'var(--dsw-alias-state-error-primary)' } }),
+                h('span', { style: { ...styles.questionLabel, color: ok ? undefined : 'var(--dsw-alias-state-error-primary)' } },
+                  `#${question.index}`,
+                  ok ? '' : ` — ${question.error === undefined ? t('q_failed') : question.error}`),
+                question.usage !== undefined && h('span', { style: styles.usageLine }, formatUsage(question.usage))),
+              question.text !== undefined && h('pre', { style: styles.reply }, question.text),
+              ok && question.usage !== undefined && h('p', { style: { ...styles.usageLine, margin: '0 0 6px', padding: '0 10px' } }, `${t('usage')}: ${formatUsage(question.usage)}`)))
+          }
+        }
+        const usage = formatUsage(result.usage)
+        if (usage !== null) children.push(h('p', { style: { ...styles.usageLine, margin: 0, textAlign: 'right' } }, `${t('usage')}: ${usage}`))
       }
       children.push(h('details', { style: styles.method },
         h('summary', null, t('method')),
-        h('p', { style: styles.line }, t('notes'))))
+        h('p', { style: styles.verdictSub }, t('notes'))))
       return h('section', { 'aria-live': 'polite' }, ...children)
+    }
+
+    function SectionTitle(text) {
+      return h('h3', { style: styles.sectionTitle }, text)
+    }
+
+    function VerdictBody({ t, snapshot }) {
+      const result = snapshot.result
+      const tone = DECISION_TONE[snapshot.state] ?? DECISION_TONE[result?.decision] ?? 'var(--dsw-alias-label-tertiary)'
+      const label = snapshot.state === 'completed' && result?.decision !== undefined
+        ? (DECISION_KEYS[result.decision] === undefined ? result.decision : t(DECISION_KEYS[result.decision]))
+        : t(snapshot.state)
+      const out = [
+        h('span', { key: 'tone', style: { ...styles.verdictTone, background: tone } }, label),
+      ]
+      if (result !== undefined && result.decision !== 'error' && result.predictionName !== undefined) {
+        out.push(h('div', { key: 'pred', style: styles.predictionName }, result.predictionName))
+        out.push(h('div', { key: 'cfg', style: styles.verdictSub },
+          `${t('configured_model')}: ${snapshot.model}${snapshot.provider === undefined ? '' : ` · ${snapshot.provider}`}`))
+        const chips = []
+        if (result.familyPredictionName !== undefined) {
+          chips.push(h('span', { key: 'family', style: styles.chip }, result.familyPredictionName))
+        }
+        const probability = result.probability
+        chips.push(probability === null || probability === undefined
+          ? h('span', { key: 'prob', style: { ...styles.chip, color: 'var(--dsw-alias-label-tertiary)' } }, t('no_probability'))
+          : h('div', { key: 'prob', style: styles.meter },
+            h('div', { style: styles.meterTrack },
+              h('div', { style: { ...styles.meterFill, width: `${Math.round(probability * 100)}%` } })),
+            h('span', { style: styles.meterLabel }, `${(probability * 100).toFixed(1)}%`)))
+        out.push(h('div', { key: 'chips', style: styles.chipRow }, ...chips))
+        if (probability !== null && probability !== undefined) {
+          out.push(h('div', { key: 'probHint', style: styles.verdictSub }, t('prob_ref')))
+        }
+      } else if (result?.error !== undefined) {
+        out.push(h('div', { key: 'err', style: styles.verdictSub }, result.error))
+      }
+      return out
     }
 
     const styles = {
@@ -361,17 +422,32 @@ window.__ModuleLoader__.load({
       error: { padding: '8px 12px', borderRadius: 8, border: '1px solid var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-state-error-primary)' },
       offline: { padding: '8px 12px', borderRadius: 8, border: '1px solid var(--dsw-alias-state-warn-label)', color: 'var(--dsw-alias-state-warn-label)' },
       hint: { margin: 0, color: 'var(--dsw-alias-label-tertiary)' },
-      phase: { margin: 0, fontWeight: 600 },
-      verdict: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-      badge: { padding: '2px 10px', borderRadius: 999, background: 'var(--dsw-alias-state-success-secondary)', color: 'var(--dsw-alias-label-primary)', fontSize: 12 },
-      line: { margin: 0 },
-      sectionTitle: { margin: '8px 0 0', fontSize: 13, fontWeight: 600 },
+      running: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)', fontWeight: 600, animation: 'llmdet-pulse 1.6s ease-in-out infinite' },
+      runningDot: { width: 8, height: 8, borderRadius: 999, background: 'var(--dsw-alias-brand-primary)' },
+      verdictCard: { display: 'flex', flexDirection: 'column', gap: 6, padding: 14, borderRadius: 12, border: '1px solid var(--dsw-alias-border-l)', background: 'var(--dsw-alias-interactive-bg-hover)' },
+      verdictTone: { alignSelf: 'flex-start', padding: '2px 10px', borderRadius: 999, color: '#fff', fontSize: 12, fontWeight: 600 },
+      predictionName: { fontSize: 19, fontWeight: 700, lineHeight: 1.3 },
+      verdictSub: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' },
+      chipRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 },
+      chip: { padding: '2px 10px', borderRadius: 999, border: '1px solid var(--dsw-alias-border-l)', fontSize: 12 },
+      meter: { display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 140 },
+      meterTrack: { position: 'relative', flex: 1, height: 6, borderRadius: 999, background: 'var(--dsw-alias-border-l)', overflow: 'hidden' },
+      meterFill: { height: '100%', borderRadius: 999, background: 'var(--dsw-alias-brand-primary)', transition: 'width .4s ease' },
+      meterLabel: { fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 600 },
+      block: { display: 'flex', flexDirection: 'column', gap: 6 },
+      sectionTitle: { margin: 0, fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' },
+      tableCard: { borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)', overflow: 'hidden' },
       table: { borderCollapse: 'collapse', width: '100%' },
-      th: { textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--dsw-alias-border-l)', fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' },
-      td: { padding: '4px 8px', borderBottom: '1px solid var(--dsw-alias-border-l)' },
-      question: { padding: '4px 0', borderBottom: '1px solid var(--dsw-alias-border-l)' },
-      reply: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '6px 0', padding: 8, borderRadius: 8, background: 'transparent', maxHeight: 200, overflowY: 'auto' },
-      usageLine: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' },
+      th: { textAlign: 'left', padding: '7px 10px', borderBottom: '1px solid var(--dsw-alias-border-l)', background: 'var(--dsw-alias-interactive-bg-hover)', fontWeight: 600, color: 'var(--dsw-alias-label-secondary)', fontSize: 12 },
+      td: { padding: '7px 10px', borderBottom: '1px solid var(--dsw-alias-border-l)', wordBreak: 'break-all' },
+      rowBest: { background: 'var(--dsw-alias-interactive-bg-hover)' },
+      rankBest: { fontWeight: 700, color: 'var(--dsw-alias-brand-primary)' },
+      question: { padding: 0, borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)', overflow: 'hidden' },
+      questionSummary: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', cursor: 'pointer', listStyle: 'none' },
+      questionDot: { flexShrink: 0, width: 8, height: 8, borderRadius: 999 },
+      questionLabel: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      reply: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '0 10px 8px', padding: 8, borderRadius: 8, border: '1px solid var(--dsw-alias-border-l)', maxHeight: 200, overflowY: 'auto', fontSize: 12 },
+      usageLine: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
       method: { marginTop: 4, color: 'var(--dsw-alias-label-secondary)' },
       settingsEntry: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)' },
     }
