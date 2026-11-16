@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-const QUESTION_TIMEOUT_MS = 120_000
+const QUESTION_TIMEOUT_MS = 300_000 // 5min: slow reasoning models stream long.
 const QUESTION_COUNT = 3
 const HISTORY_CAP = 30
 // Env override keeps tests off the real user history file.
