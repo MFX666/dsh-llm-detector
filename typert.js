@@ -58,6 +58,34 @@ export function parseCancelInput(value) {
   return { runId: nonEmptyString(input.runId, 'runId', MAX_ID) }
 }
 
+export function parseRoutesInput(value) {
+  if (value === undefined) return {}
+  return exactObject(value, [], 'routes input')
+}
+
+export function parseRoutesResult(value) {
+  const result = exactObject(value, ['default', 'routes'], 'routes result')
+  const out = { default: null, routes: [] }
+  if (result.default !== null && result.default !== undefined) {
+    const fallback = exactObject(result.default, ['provider', 'model', 'name'], 'default route')
+    out.default = {
+      provider: nonEmptyString(fallback.provider, 'default provider', MAX_NAME),
+      model: nonEmptyString(fallback.model, 'default model', MAX_NAME),
+      ...(fallback.name !== undefined ? { name: nonEmptyString(fallback.name, 'default name', MAX_NAME) } : {}),
+    }
+  }
+  if (!Array.isArray(result.routes)) throw new TypeError('routes must be an array')
+  out.routes = result.routes.map((item, index) => {
+    const route = exactObject(item, ['provider', 'model', 'name'], `route ${index}`)
+    return {
+      provider: nonEmptyString(route.provider, 'route provider', MAX_NAME),
+      model: nonEmptyString(route.model, 'route model', MAX_NAME),
+      ...(route.name !== undefined ? { name: nonEmptyString(route.name, 'route name', MAX_NAME) } : {}),
+    }
+  })
+  return out
+}
+
 export function parseRunIdResult(value) {
   const result = exactObject(value, ['runId'], 'result')
   return { runId: nonEmptyString(result.runId, 'runId', MAX_ID) }
@@ -165,6 +193,7 @@ export const CANCEL_INPUT = codec(`${PKG}#CancelInput`, 'The run id to cancel.',
 export const START_RESULT = codec(`${PKG}#StartResult`, 'The accepted run id.', parseRunIdResult)
 export const CANCEL_RESULT = codec(`${PKG}#CancelResult`, 'The cancelled run id.', parseRunIdResult)
 export const STATUS_RESULT = codec(`${PKG}#StatusResult`, 'One snapshot of the detector run.', parseStatusResult)
+export const ROUTES_RESULT = codec(`${PKG}#RoutesResult`, 'Model routes the detector can probe.', parseRoutesResult)
 
 const startDescriptor = inputParameter('Provider route and model id to probe.')
 startDescriptor.codec = START_INPUT
@@ -172,6 +201,8 @@ const statusDescriptor = inputParameter('Optional run id; omit to read the lates
 statusDescriptor.codec = STATUS_INPUT
 const cancelDescriptor = inputParameter('The run id to cancel.')
 cancelDescriptor.codec = CANCEL_INPUT
+const routesDescriptor = inputParameter('List the model routes available for detection.', true)
+routesDescriptor.codec = codec(`${PKG}#RoutesInput`, 'Empty request.', parseRoutesInput)
 
 export const TYPERT = {
   package: PKG,
@@ -211,6 +242,17 @@ export const TYPERT = {
       parameters: [cancelDescriptor],
       cancellation: { parameter: 'signal' },
       result: CANCEL_RESULT,
+    },
+    {
+      id: `${PKG}#${NS}/listRoutes`,
+      service: NS,
+      namespace: NS,
+      method: 'listRoutes',
+      description: 'List the provider/model routes the detector can probe, plus the current default selection.',
+      invocation: { kind: 'direct' },
+      parameters: [routesDescriptor],
+      cancellation: { parameter: 'signal' },
+      result: ROUTES_RESULT,
     },
   ],
 }

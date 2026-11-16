@@ -11,15 +11,16 @@ window.__ModuleLoader__.load({
     const NS = 'llmDetector'
     const PANEL_ID = 'llm-detector'
     const PKG = '@local/dsh-llm-detector'
+    let getContext = () => undefined
 
     const zh = {
       panel: '模型检测',
       title: 'LMFPD 模型检测',
       intro: '用 3 道计数挑战题判断当前配置的模型是否为 LMFPD 库内已知模型。仅对本 DSH 实例已配置的 Provider 路由发起请求，不会发送任何密钥或页面数据。',
-      provider: 'Provider 路由',
-      model: '模型 ID',
-      providerPlaceholder: '留空则用默认模型（如 deepseek）',
-      modelPlaceholder: '留空则用默认模型（如 deepseek-chat）',
+      choose_model: '选择模型',
+      default_model: '默认模型',
+      settings_entry: '模型检测',
+      settings_entry_hint: '用计数挑战题识别当前模型，查看是否命中参考库',
       start: '开始检测',
       starting: '启动中…',
       cost: '开始后将向该模型串行发送 3 个请求，可能产生 token 费用。',
@@ -59,10 +60,10 @@ window.__ModuleLoader__.load({
       panel: 'LM Detector',
       title: 'LMFPD model detector',
       intro: 'Probes whether the configured model is an LMFPD-listed model with 3 counting challenges. Requests only the provider routes this DSH instance already configured; no keys or page data are sent.',
-      provider: 'Provider route',
-      model: 'Model id',
-      providerPlaceholder: 'Blank = default model (e.g. deepseek)',
-      modelPlaceholder: 'Blank = default model (e.g. deepseek-chat)',
+      choose_model: 'Model',
+      default_model: 'Default model',
+      settings_entry: 'Model detection',
+      settings_entry_hint: 'Identify the current model with counting challenges against a reference bank',
       start: 'Start detection',
       starting: 'Starting…',
       cost: 'Starting sends 3 serial requests to the model and may incur token cost.',
@@ -127,6 +128,7 @@ window.__ModuleLoader__.load({
       descriptor('start', 'Start one detection run against a configured provider/model route.'),
       descriptor('status', 'Read the current run snapshot.', true),
       descriptor('cancel', 'Cancel the run with the given id.'),
+      descriptor('listRoutes', 'List probe-able model routes and the default selection.', true),
     ]
 
     const DECISION_KEYS = {
@@ -147,6 +149,23 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // Row inside 设置 → 模型; clicking opens the detector panel and closes
+    // the settings modal (it stays mounted over the panel otherwise).
+    function SettingsEntry({ t }) {
+      return h('div', { style: styles.settingsEntry },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+          h('span', { style: { fontWeight: 600 } }, t('settings_entry')),
+          h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, t('settings_entry_hint'))),
+        h('button', {
+          onClick: () => {
+            getContext()?.layout?.selectPanel(PANEL_ID)
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+          },
+          style: styles.secondary,
+        }, t('start')),
+      )
+    }
+
     function formatUsage(usage) {
       if (usage === undefined) return null
       const parts = [`in ${usage.inputTokens}`, `out ${usage.outputTokens}`]
@@ -156,8 +175,8 @@ window.__ModuleLoader__.load({
     }
 
     function Page({ t, api }) {
-      const [provider, setProvider] = useState('')
-      const [model, setModel] = useState('')
+      const [routeKey, setRouteKey] = useState('')
+      const [routes, setRoutes] = useState(undefined)
       const [snapshot, setSnapshot] = useState(undefined)
       const [busyStarting, setBusyStarting] = useState(false)
       const [error, setError] = useState(undefined)
@@ -191,12 +210,34 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer)
       }, [snapshot, refresh])
 
+      // Model catalog for the picker; failure leaves just the default option.
+      useEffect(() => {
+        let alive = true
+        void api.listRoutes({}).then(result => {
+          if (alive && result.ok) setRoutes(result.value)
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [api])
+
       const active = snapshot !== undefined && ACTIVE_STATES.has(snapshot.state)
+      const options = []
+      const defaultLabel = routes?.default === null || routes?.default === undefined
+        ? t('default_model')
+        : `${t('default_model')}（${routes.default.name ?? routes.default.model} · ${routes.default.provider}）`
+      options.push(h('option', { key: '', value: '' }, defaultLabel))
+      const seen = new Set()
+      for (const route of routes?.routes ?? []) {
+        const key = `${route.provider}|${route.model}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        options.push(h('option', { key, value: key }, `${route.name ?? route.model} · ${route.provider}`))
+      }
       const start = async () => {
         setBusyStarting(true)
         setError(undefined)
         try {
-          const result = await api.start({ provider: provider.trim(), model: model.trim() })
+          const [provider, model] = routeKey === '' ? ['', ''] : routeKey.split('|')
+          const result = await api.start({ provider, model })
           if (!result.ok) {
             const issue = result.error.details?.issues?.[0]
             setError(issue?.code === 'busy' ? t('busy') : `${t('start_failed')}: ${result.error.message}`)
@@ -225,11 +266,8 @@ window.__ModuleLoader__.load({
         h('p', { style: styles.intro }, t('intro')),
         h('div', { style: styles.form },
           h('label', { style: styles.field },
-            h('span', null, t('provider')),
-            h('input', { value: provider, onChange: e => setProvider(e.target.value), placeholder: t('providerPlaceholder'), style: styles.input, disabled: active })),
-          h('label', { style: styles.field },
-            h('span', null, t('model')),
-            h('input', { value: model, onChange: e => setModel(e.target.value), placeholder: t('modelPlaceholder'), style: styles.input, disabled: active })),
+            h('span', null, t('choose_model')),
+            h('select', { value: routeKey, onChange: e => setRouteKey(e.target.value), style: styles.input, disabled: active }, ...options)),
           h('div', { style: styles.actions },
             active
               ? h('button', { onClick: () => { void cancel() }, style: styles.secondary }, t('cancel'))
@@ -335,6 +373,7 @@ window.__ModuleLoader__.load({
       reply: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '6px 0', padding: 8, borderRadius: 8, background: 'transparent', maxHeight: 200, overflowY: 'auto' },
       usageLine: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' },
       method: { marginTop: 4, color: 'var(--dsw-alias-label-secondary)' },
+      settingsEntry: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)' },
     }
 
     // Data layer over the mounted llmDetector namespace. `ctx.remote.llmDetector`
@@ -351,6 +390,7 @@ window.__ModuleLoader__.load({
         async status(input) { return ns().status(input) },
         async start(input) { return ns().start(input) },
         async cancel(input) { return ns().cancel(input) },
+        async listRoutes(input) { return ns().listRoutes(input ?? {}) },
       }
     }
 
@@ -375,6 +415,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      getContext = () => ctx
       ctx.locale.register(NS, { zh, en })
       const t = ctx.locale.bind(NS)
       const api = createApi(() => ctx)
@@ -390,6 +431,12 @@ window.__ModuleLoader__.load({
         locale: NS,
         label: () => t('panel'),
       }, PanelIcon))
+      ctx.slots.inject('settings.models.footer', () => ctx.slots.register({
+        name: 'settings.models.footer',
+        id: PANEL_ID,
+        locale: NS,
+        inject: () => ({ t }),
+      }, SettingsEntry))
       mountWhenReady(ctx, { package: PKG, descriptors: INVOCATIONS })
     }
 

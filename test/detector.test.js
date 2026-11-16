@@ -5,7 +5,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { TYPERT, parseStartInput, parseStatusInput, parseCancelInput } from '../typert.js'
+import { TYPERT, parseStartInput, parseStatusInput, parseCancelInput, parseRoutesInput, parseRoutesResult } from '../typert.js'
 import Service from '../index.js'
 
 // TypertRemoteService extends a real cordis Service, so the fake needs a real
@@ -35,7 +35,7 @@ test('TYPERT manifest shape', () => {
   assert.equal(TYPERT.package, '@local/dsh-llm-detector')
   assert.equal(TYPERT.face, 'host')
   assert.deepEqual(TYPERT.model, { services: [], events: [], objects: [] })
-  assert.deepEqual(TYPERT.invocations.map(d => d.method), ['start', 'status', 'cancel'])
+  assert.deepEqual(TYPERT.invocations.map(d => d.method), ['start', 'status', 'cancel', 'listRoutes'])
   for (const d of TYPERT.invocations) {
     assert.equal(d.service, 'llmDetector')
     assert.equal(d.namespace, 'llmDetector')
@@ -65,6 +65,20 @@ test('status/cancel codecs', () => {
   assert.throws(() => parseStatusInput(5))
   assert.deepEqual(parseCancelInput({ runId: 'run-1' }), { runId: 'run-1' })
   assert.throws(() => parseCancelInput({}))
+})
+
+test('routes codec: nullable default, named routes', () => {
+  assert.deepEqual(parseRoutesInput(undefined), {})
+  assert.deepEqual(parseRoutesResult({ default: null, routes: [] }), { default: null, routes: [] })
+  const value = parseRoutesResult({
+    default: { provider: 'zcode', model: 'GLM-5.3-FlashX', name: 'GLM 5.3 FlashX · ZCode' },
+    routes: [{ provider: 'deepseek', model: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash' }, { provider: 'p', model: 'm' }],
+  })
+  assert.deepEqual(value.default, { provider: 'zcode', model: 'GLM-5.3-FlashX', name: 'GLM 5.3 FlashX · ZCode' })
+  assert.deepEqual(value.routes[1], { provider: 'p', model: 'm' })
+  assert.throws(() => parseRoutesResult({ routes: [] }))
+  assert.throws(() => parseRoutesResult({ default: null, routes: [{ provider: 'p' }] }))
+  assert.throws(() => parseRoutesResult({ default: { provider: 'p' }, routes: [] }))
 })
 
 test('full run: start → sampling → completed with result', async () => {

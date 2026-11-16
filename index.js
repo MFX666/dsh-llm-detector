@@ -101,6 +101,30 @@ export default class LlmDetectorService extends TypertRemoteService {
     return { runId: run.runId }
   }
 
+  async listRoutes() {
+    const routes = []
+    for (const provider of this.ctx.llm.listProviders()) {
+      const id = typeof provider === 'string' ? provider : provider?.id
+      if (typeof id !== 'string' || id === '') continue
+      try {
+        for (const model of await this.ctx.llm.listModels(id)) {
+          if (typeof model?.id === 'string' && model.id !== '') {
+            routes.push({ provider: id, model: model.id, ...(typeof model.name === 'string' && model.name !== '' && model.name !== model.id ? { name: model.name } : {}) })
+          }
+        }
+      } catch {
+        // Adapter without a catalog: routing still works, just not selectable here.
+      }
+    }
+    const sel = this.ctx.get('agentDefaultModel')?.currentSelection()
+    let fallback = null
+    if (typeof sel?.provider === 'string' && sel.provider !== '' && typeof sel?.model === 'string' && sel.model !== '') {
+      const match = routes.find(route => route.provider === sel.provider && route.model === sel.model)
+      fallback = { provider: sel.provider, model: sel.model, ...(match?.name !== undefined ? { name: match.name } : {}) }
+    }
+    return { default: fallback, routes }
+  }
+
   _resolve(runId) {
     if (this._active !== undefined && (runId === undefined || this._active.runId === runId)) return this._active
     if (this._last !== undefined && (runId === undefined || this._last.runId === runId)) return this._last
