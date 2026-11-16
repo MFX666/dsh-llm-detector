@@ -4,6 +4,10 @@ DSH plugin: LMFPD 模型检测 — 用 3 道计数挑战题判断当前配置的
 
 Sidebar entry (模型检测) + main panel; host tool `llm_detector` (action: start/status/cancel).
 
+## 开源项目
+
+- [Ikaleio/lm-detector](https://github.com/Ikaleio/lm-detector) — 提供 `lmfpd-sdk` (MIT)，用于模型指纹样本加载与评分。
+
 ## Run
 
 1. `npm install`
