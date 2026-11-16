@@ -65,6 +65,7 @@ export function parseRoutesInput(value) {
 
 export function parseRoutesResult(value) {
   const result = exactObject(value, ['default', 'routes'], 'routes result')
+  if (result.default === undefined || !Array.isArray(result.routes)) throw new TypeError('routes result needs a default and a routes array')
   const out = { default: null, routes: [] }
   if (result.default !== null && result.default !== undefined) {
     const fallback = exactObject(result.default, ['provider', 'model', 'name'], 'default route')
