@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-llm-detector
+      name: '@local/dsh-llm-detector'
+      config: {}
