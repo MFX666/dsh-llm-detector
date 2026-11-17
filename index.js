@@ -2,9 +2,10 @@
 // One detection run at a time; in-memory only. lmfpd-sdk owns scoring, this
 // service owns sampling through ctx.llm and the single-run state machine.
 import { randomUUID } from 'node:crypto'
-import { appendFile, readFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -13,6 +14,13 @@ const QUESTION_COUNT = 3
 const HISTORY_CAP = 30
 // Env override keeps tests off the real user history file.
 const HISTORY_FILE = process.env.LLM_DETECTOR_HISTORY ?? join(homedir(), '.dsh', 'llm-detector-runs.jsonl')
+// Pelican test: one prompt, one reply, saved as an HTML artifact in the
+// plugin's own pelican/ directory (env override keeps tests off it).
+const MAX_HTML = 400_000
+const PELICAN_PROMPT = [
+  '创建一个HTML，内容是SVG绘制一个鹈鹕骑自行车的2D动画。鹈鹕必须有可辨认的长嘴和喉囊；双脚持续踩住左右踏板，踏板相位相反，车轮同步向前滚动，翅膀扶住车把。保持身体、四肢和车体连接，不能只移动一整张静态图。',
+  '不允许查询互联网，不允许读取记忆，不允许加载技能，不允许测试，不允许读取本地文件。',
+].join('\n')
 
 // Number-counting challenges never need temperature tuning; provider defaults
 // keep the sample representative of the configured model's ordinary behavior.
@@ -60,6 +68,7 @@ export default class LlmDetectorService extends TypertRemoteService {
       runId,
       provider,
       model,
+      kind: input.kind === 'pelican' ? 'pelican' : 'lmfpd',
       concurrency: Math.min(6, Math.max(1, input.concurrency ?? 1)),
       controller,
       startedAt: Date.now(),
@@ -86,6 +95,7 @@ export default class LlmDetectorService extends TypertRemoteService {
         runId: run.runId,
         provider: run.provider,
         model: run.model,
+        kind: run.kind,
         startedAt: run.startedAt,
         finishedAt: run.finishedAt,
         result: run.result,
@@ -96,6 +106,7 @@ export default class LlmDetectorService extends TypertRemoteService {
       runId: run.runId,
       provider: run.provider,
       model: run.model,
+      kind: run.kind,
       phase: run.phase,
       questionIndex: run.questionIndex,
       startedAt: run.startedAt,
@@ -180,6 +191,7 @@ export default class LlmDetectorService extends TypertRemoteService {
   }
 
   async _run(run) {
+    if (run.kind === 'pelican') return this._runPelican(run)
     const { runId, provider, model, controller } = run
     let detector
     let challenges
@@ -273,6 +285,27 @@ export default class LlmDetectorService extends TypertRemoteService {
     }
   }
 
+  /** Pelican run: one request, save the HTML artifact under the plugin dir. */
+  async _runPelican(run) {
+    run.phase = 'sampling'
+    let usage
+    try {
+      const sample = await this._sampleQuestion(run, PELICAN_PROMPT)
+      usage = sample.usage
+      const html = extractHtml(sample.text)
+      if (html === '') throw new Error('model reply contained no HTML')
+      if (html.length > MAX_HTML) throw new Error(`html exceeds ${MAX_HTML} characters`)
+      const dir = pelicanDir()
+      await mkdir(dir, { recursive: true })
+      const htmlPath = join(dir, `${run.runId}.html`)
+      await writeFile(htmlPath, html, 'utf8')
+      this._settle(run, 'completed', { decision: 'pelican', htmlPath, html, ...(usage === undefined ? {} : { usage }) })
+    } catch (error) {
+      const state = run.controller.signal.aborted ? 'cancelled' : 'failed'
+      this._settle(run, state, { decision: 'error', error: sanitizeError(error), ...(usage === undefined ? {} : { usage }) })
+    }
+  }
+
   /** One question: stream the challenge, count only text deltas, demand finish stop. */
   async _sampleQuestion(run, prompt) {
     const timeout = new AbortController()
@@ -325,6 +358,25 @@ function abortError() {
   return error
 }
 
+/** Models love fences: prefer the fenced block, else cut leading prose. */
+function extractHtml(text) {
+  let out = text.trim()
+  const fence = out.match(/```[^\n]*\n([\s\S]*?)```/)
+  if (fence !== null) out = fence[1].trim()
+  else {
+    const start = out.search(/<!doctype html|<html[\s>]|<svg[\s>]/i)
+    if (start > 0) out = out.slice(start).trim()
+  }
+  return out.includes('<') ? out : ''
+}
+
+/** Artifact home: the plugin's own pelican/ dir; env override keeps tests off it. */
+function pelicanDir() {
+  const override = process.env.LLM_DETECTOR_PELICAN_DIR
+  if (override !== undefined && override !== '') return override
+  return join(fileURLToPath(new URL('.', import.meta.url)), 'pelican')
+}
+
 /** Never echo transport details: keep the message text only, bounded. */
 function sanitizeError(error) {
   const message = error instanceof Error ? error.message : String(error)
@@ -336,14 +388,16 @@ function createDetectorTool(service) {
   return defineTool({
     name: 'llm_detector',
     description: [
-      'Detect whether a configured model is an LMFPD-listed model by asking it three number-counting challenge questions.',
-      'Each action=start run sends exactly 3 model requests on the given provider/model route, which may incur token cost.',
+      'Model probe tool. kind=lmfpd (default): detect whether a configured model is an LMFPD-listed model via three number-counting challenges.',
+      'kind=pelican: ask the model to generate an SVG pelican-riding-a-bicycle 2D animation page; the HTML is saved under the plugin directory and returned in the verdict for preview.',
+      'Each action=start run sends model requests on the given provider/model route, which may incur token cost.',
       'action=status reads progress or the final verdict; action=cancel aborts an active run.',
     ].join(' '),
     parameters: {
       action: { type: 'string', enum: ['start', 'status', 'cancel'], required: true, description: 'Which operation to perform.' },
       provider: { type: 'string', description: 'Registered provider route; required for action=start.' },
       model: { type: 'string', description: 'Model id on that route; required for action=start.' },
+      kind: { type: 'string', enum: ['lmfpd', 'pelican'], description: 'Test kind; default lmfpd.' },
       runId: { type: 'string', description: 'Run id; required for action=cancel, optional for action=status.' },
     },
     output: {
@@ -357,7 +411,12 @@ function createDetectorTool(service) {
         if (typeof args.provider !== 'string' || typeof args.model !== 'string') {
           throw new Error('action=start requires provider and model')
         }
-        return service.start({ provider: args.provider, model: args.model, ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}) })
+        return service.start({
+          provider: args.provider,
+          model: args.model,
+          ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
+          ...(typeof args.kind === 'string' ? { kind: args.kind } : {}),
+        })
       }
       if (args.action === 'status') return service.status({ ...(args.runId === undefined ? {} : { runId: args.runId }) })
       if (typeof args.runId !== 'string') throw new Error('action=cancel requires runId')

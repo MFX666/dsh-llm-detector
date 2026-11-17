@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { TYPERT, parseStartInput, parseStatusInput, parseCancelInput, parseRoutesInput, parseRoutesResult, parseRunsResult } from '../typert.js'
+import { TYPERT, parseStartInput, parseStatusInput, parseCancelInput, parseRoutesInput, parseRoutesResult, parseRunsResult, parseRunResult } from '../typert.js'
 
 process.env.LLM_DETECTOR_HISTORY = join(tmpdir(), `llm-detector-test-${randomUUID().slice(0, 8)}.jsonl`)
 const { default: Service } = await import('../index.js')
@@ -186,6 +186,65 @@ test('busy then cancel', async () => {
   await flush(1500) // sample question throws on abort → run settles cancelled
   const snap = svc.status({ runId: first.runId })
   assert.equal(snap.state, 'cancelled')
+})
+
+test('start codec: optional kind lmfpd|pelican', () => {
+  assert.deepEqual(parseStartInput({ provider: 'p', model: 'm', kind: 'pelican' }), { provider: 'p', model: 'm', kind: 'pelican' })
+  assert.deepEqual(parseStartInput({ provider: 'p', model: 'm', kind: 'lmfpd' }), { provider: 'p', model: 'm', kind: 'lmfpd' })
+  assert.throws(() => parseStartInput({ provider: 'p', model: 'm', kind: 'other' }))
+})
+
+test('run codec: pelican result requires htmlPath + html', () => {
+  const value = parseRunResult({ decision: 'pelican', htmlPath: '/tmp/a.html', html: '<svg/>' })
+  assert.equal(value.htmlPath, '/tmp/a.html')
+  assert.equal(value.html, '<svg/>')
+  // html without path (or vice versa) is rejected
+  assert.throws(() => parseRunResult({ decision: 'pelican', html: '<svg/>' }))
+  assert.throws(() => parseRunResult({ decision: 'pelican', htmlPath: '/tmp/a.html' }))
+  assert.throws(() => parseRunResult({ decision: 'pelican', htmlPath: '/tmp/a.html', html: 'x'.repeat(400_001) }))
+  assert.throws(() => parseRunResult({ decision: 'scored', htmlPath: '/tmp/a.html', html: '<svg/>' }))
+})
+
+test('full pelican run: saves HTML artifact, returns decision pelican', async () => {
+  const html = '<!doctype html>\n<html><body><svg viewBox="0 0 100 100"><circle r="10"/></svg></body></html>'
+  const ctx = fakeCtx({ stream: fakeStream(['```html\n', html, '\n```']) })
+  const svc = new Service(ctx, {})
+  const started = svc.start({ provider: 'p', model: 'm', kind: 'pelican' })
+  assert.match(started.runId, /^run-/)
+  let snap
+  for (let i = 0; i < 100; i++) {
+    snap = svc.status({ runId: started.runId })
+    if (snap.state === 'completed' || snap.state === 'failed' || snap.state === 'cancelled') break
+    await flush(100)
+  }
+  assert.equal(snap.state, 'completed')
+  assert.equal(snap.kind, 'pelican')
+  assert.equal(snap.result.decision, 'pelican')
+  assert.equal(snap.result.html, html)
+  assert.match(snap.result.htmlPath, /\/pelican\//) // env override dir name contains 'pelican-'
+  assert.equal(snap.result.usage.inputTokens, 11)
+  const saved = readFileSync(snap.result.htmlPath, 'utf8')
+  assert.equal(saved, html)
+  // listRuns round-trips the artifact too
+  const runs = await svc.listRuns()
+  const row = runs.runs.find(r => r.runId === started.runId)
+  assert.equal(row.result.decision, 'pelican')
+  assert.equal(row.result.htmlPath, snap.result.htmlPath)
+})
+
+test('pelican run: reply without HTML settles failed', async () => {
+  const ctx = fakeCtx({ stream: fakeStream(['I cannot draw.']) })
+  const svc = new Service(ctx, {})
+  const started = svc.start({ provider: 'p', model: 'm', kind: 'pelican' })
+  let snap
+  for (let i = 0; i < 100; i++) {
+    snap = svc.status({ runId: started.runId })
+    if (snap.state === 'completed' || snap.state === 'failed' || snap.state === 'cancelled') break
+    await flush(100)
+  }
+  assert.equal(snap.state, 'failed')
+  assert.equal(snap.result.decision, 'error')
+  assert.match(snap.result.error, /no HTML/)
 })
 
 test('client.js parses (browser bundle ships untested — guard the syntax)', () => {

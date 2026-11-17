@@ -6,6 +6,7 @@
 const MAX_ID = 128
 const MAX_NAME = 200
 const MAX_TEXT = 100_000
+const MAX_HTML = 400_000
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -38,7 +39,7 @@ function codec(typeSymbol, description, parse) {
 // --- wire payloads -----------------------------------------------------------
 
 export function parseStartInput(value) {
-  const input = exactObject(value, ['provider', 'model', 'concurrency'], 'start input')
+  const input = exactObject(value, ['provider', 'model', 'concurrency', 'kind'], 'start input')
   // Empty route means "use the host's current default model selection".
   const out = {
     provider: input.provider === undefined || input.provider === '' ? '' : nonEmptyString(input.provider, 'provider', MAX_NAME),
@@ -47,6 +48,10 @@ export function parseStartInput(value) {
   if (input.concurrency !== undefined) {
     if (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 6) throw new TypeError('concurrency must be an integer 1..6')
     out.concurrency = input.concurrency
+  }
+  if (input.kind !== undefined) {
+    if (!['lmfpd', 'pelican'].includes(input.kind)) throw new TypeError('kind must be lmfpd or pelican')
+    out.kind = input.kind
   }
   return out
 }
@@ -110,12 +115,16 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 // Shallow validation: the terminal snapshot is our own Host-produced JSON, the
 // gateway already asserts JSON-ness; here we pin only the discriminant shape.
 export function parseStatusResult(value) {
-  const result = exactObject(value, ['state', 'runId', 'provider', 'model', 'phase', 'questionIndex', 'startedAt', 'finishedAt', 'result'], 'status result')
+  const result = exactObject(value, ['state', 'runId', 'provider', 'model', 'kind', 'phase', 'questionIndex', 'startedAt', 'finishedAt', 'result'], 'status result')
   if (!STATES.includes(result.state)) throw new TypeError('status result has an unknown state')
   const out = { state: result.state }
   if (result.runId !== undefined) out.runId = nonEmptyString(result.runId, 'runId', MAX_ID)
   if (result.provider !== undefined) out.provider = nonEmptyString(result.provider, 'provider', MAX_NAME)
   if (result.model !== undefined) out.model = nonEmptyString(result.model, 'model', MAX_NAME)
+  if (result.kind !== undefined) {
+    if (!['lmfpd', 'pelican'].includes(result.kind)) throw new TypeError('status result has an unknown kind')
+    out.kind = result.kind
+  }
   if (result.phase !== undefined) {
     if (!['loading_data', 'sampling', 'analyzing'].includes(result.phase)) throw new TypeError('status result has an unknown phase')
     out.phase = result.phase
@@ -139,9 +148,16 @@ function requireNumber(value, what) {
 }
 
 export function parseRunResult(value) {
-  const result = exactObject(value, ['decision', 'prediction', 'predictionName', 'familyPredictionName', 'candidates', 'questions', 'probability', 'probabilityScope', 'usedOutputs', 'rankingScore', 'usage', 'error'], 'run result')
-  if (!['scored', 'partial', 'unscorable', 'not_model', 'error'].includes(result.decision)) throw new TypeError('run result has an unknown decision')
+  const result = exactObject(value, ['decision', 'prediction', 'predictionName', 'familyPredictionName', 'candidates', 'questions', 'probability', 'probabilityScope', 'usedOutputs', 'rankingScore', 'usage', 'error', 'htmlPath', 'html'], 'run result')
+  if (!['scored', 'partial', 'unscorable', 'not_model', 'error', 'pelican'].includes(result.decision)) throw new TypeError('run result has an unknown decision')
   const out = { decision: result.decision }
+  // Pelican artifacts ride only on decision 'pelican'; both fields required there.
+  if (result.decision === 'pelican') {
+    out.htmlPath = nonEmptyString(result.htmlPath, 'pelican htmlPath', 1024)
+    out.html = nonEmptyString(result.html, 'pelican html', MAX_HTML)
+  } else if (result.htmlPath !== undefined || result.html !== undefined) {
+    throw new TypeError('htmlPath/html are only valid on decision pelican')
+  }
   for (const key of ['prediction', 'predictionName', 'familyPredictionName']) {
     if (result[key] !== undefined) out[key] = String(result[key])
   }
@@ -200,7 +216,7 @@ function inputParameter(description, acceptsUndefined = false) {
   return { name: 'input', wire: 'input', description, source: 'json', ...(acceptsUndefined ? { acceptsUndefined: true } : {}), codec: undefined }
 }
 
-export const START_INPUT = codec(`${PKG}#StartInput`, 'Provider route and model id to probe.', parseStartInput)
+export const START_INPUT = codec(`${PKG}#StartInput`, 'Provider route, model id and test kind to probe.', parseStartInput)
 export const STATUS_INPUT = codec(`${PKG}#StatusInput`, 'Optional run id; omit for the latest run.', parseStatusInput)
 export const CANCEL_INPUT = codec(`${PKG}#CancelInput`, 'The run id to cancel.', parseCancelInput)
 export const START_RESULT = codec(`${PKG}#StartResult`, 'The accepted run id.', parseRunIdResult)
@@ -209,7 +225,7 @@ export const STATUS_RESULT = codec(`${PKG}#StatusResult`, 'One snapshot of the d
 export const ROUTES_RESULT = codec(`${PKG}#RoutesResult`, 'Model routes the detector can probe.', parseRoutesResult)
 export const RUNS_RESULT = codec(`${PKG}#RunsResult`, 'Finished detection runs, newest first.', parseRunsResult)
 
-const startDescriptor = inputParameter('Provider route and model id to probe.')
+const startDescriptor = inputParameter('Provider route, model id and test kind to probe.')
 startDescriptor.codec = START_INPUT
 const statusDescriptor = inputParameter('Optional run id; omit to read the latest run.', true)
 statusDescriptor.codec = STATUS_INPUT
@@ -231,7 +247,7 @@ export const TYPERT = {
       service: NS,
       namespace: NS,
       method: 'start',
-      description: 'Start one detection run: 3 counting challenges against the configured model. Fails with busy when a run is active.',
+      description: 'Start one detection run: kind=lmfpd runs 3 counting challenges, kind=pelican asks for one SVG pelican-bicycle animation page. Fails with busy when a run is active.',
       invocation: { kind: 'direct' },
       parameters: [startDescriptor],
       cancellation: { parameter: 'signal' },

@@ -59,6 +59,15 @@ window.__ModuleLoader__.load({
       start_failed: '启动失败',
       error: '错误',
       raw_reply: '原始回复',
+      kind_label: '检测类型',
+      kind_lmfpd: 'LMFPD 计数挑战',
+      kind_pelican: '鹈鹕绘画测试',
+      intro_pelican: '让模型直接生成 SVG 鹈鹕骑自行车的 2D 动画页面，检验空间想象与代码构造能力；HTML 保存在插件目录的 pelican/ 下，并在下方实时预览。',
+      cost_pelican: '开始后将向该模型发送 1 个请求，可能产生 token 费用。',
+      phase_generating: '生成鹈鹕动画…',
+      decision_pelican: '鹈鹕测试完成',
+      pelican_saved: '已保存到',
+      pelican_preview: '动画预览',
     }
     const en = {
       panel: 'LM Detector',
@@ -106,6 +115,15 @@ window.__ModuleLoader__.load({
       start_failed: 'Start failed',
       error: 'Error',
       raw_reply: 'Raw reply',
+      kind_label: 'Test kind',
+      kind_lmfpd: 'LMFPD counting challenges',
+      kind_pelican: 'Pelican drawing test',
+      intro_pelican: 'Asks the model to generate an SVG pelican-riding-a-bicycle 2D animation page to probe spatial imagination and code construction; the HTML is saved under the plugin pelican/ dir and previewed live below.',
+      cost_pelican: 'Starting sends 1 request to the model and may incur token cost.',
+      phase_generating: 'Generating the pelican animation…',
+      decision_pelican: 'Pelican test completed',
+      pelican_saved: 'Saved to',
+      pelican_preview: 'Animation preview',
     }
 
     // Client-side descriptors only need the strict shape; the Host decodes.
@@ -133,7 +151,7 @@ window.__ModuleLoader__.load({
       }
     }
     const INVOCATIONS = [
-      descriptor('start', 'Start one detection run against a configured provider/model route.'),
+      descriptor('start', 'Start one detection run: kind=lmfpd counting challenges (default) or kind=pelican drawing test.'),
       descriptor('status', 'Read the current run snapshot.', true),
       descriptor('cancel', 'Cancel the run with the given id.'),
       descriptor('listRoutes', 'List probe-able model routes and the default selection.', true),
@@ -145,6 +163,7 @@ window.__ModuleLoader__.load({
       partial: 'decision_partial',
       unscorable: 'decision_unscorable',
       not_model: 'decision_not_model',
+      pelican: 'decision_pelican',
     }
     const ACTIVE_STATES = new Set(['loading_data', 'sampling', 'analyzing'])
 
@@ -184,6 +203,7 @@ window.__ModuleLoader__.load({
     }
 
     const ROUTE_STORAGE_KEY = 'dsh-llm-detector.route'
+    const KIND_STORAGE_KEY = `${ROUTE_STORAGE_KEY}-kind`
 
     function Page({ t, api }) {
       // Selection survives panel switches: React state dies on unmount.
@@ -195,6 +215,13 @@ window.__ModuleLoader__.load({
         setRouteKeyState(value)
       }
       const [concurrency, setConcurrency] = useState(1)
+      const [kind, setKindState] = useState(() => {
+        try { return localStorage.getItem(KIND_STORAGE_KEY) ?? 'lmfpd' } catch { return 'lmfpd' }
+      })
+      const setKind = (value) => {
+        try { localStorage.setItem(KIND_STORAGE_KEY, value) } catch { }
+        setKindState(value)
+      }
       const [routes, setRoutes] = useState(undefined)
       const [snapshot, setSnapshot] = useState(undefined)
       const [busyStarting, setBusyStarting] = useState(false)
@@ -267,7 +294,7 @@ window.__ModuleLoader__.load({
         setError(undefined)
         try {
           const [provider, model] = routeKey === '' ? ['', ''] : routeKey.split('|')
-          const result = await api.start({ provider, model, concurrency })
+          const result = await api.start({ provider, model, kind, concurrency })
           if (!result.ok) {
             const issue = result.error.details?.issues?.[0]
             setError(issue?.code === 'busy' ? t('busy') : `${t('start_failed')}: ${result.error.message}`)
@@ -293,12 +320,17 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.page },
         h('h2', { style: styles.title }, t('title')),
         offline && h('div', { role: 'alert', style: styles.offline }, t('offline')),
-        h('p', { style: styles.intro }, t('intro')),
+        h('p', { style: styles.intro }, kind === 'pelican' ? t('intro_pelican') : t('intro')),
         h('div', { style: styles.form },
+          h('label', { style: styles.field },
+            h('span', null, t('kind_label')),
+            h('select', { value: kind, onChange: e => setKind(e.target.value), style: styles.input, disabled: active },
+              h('option', { value: 'lmfpd' }, t('kind_lmfpd')),
+              h('option', { value: 'pelican' }, t('kind_pelican')))),
           h('label', { style: styles.field },
             h('span', null, t('choose_model')),
             h('select', { value: routeKey, onChange: e => setRouteKey(e.target.value), style: styles.input, disabled: active }, ...options)),
-          h('label', { style: styles.field },
+          kind !== 'pelican' && h('label', { style: styles.field },
             h('span', null, t('concurrency')),
             h('select', { value: String(concurrency), onChange: e => setConcurrency(Number(e.target.value)), style: styles.input, disabled: active },
               h('option', { value: '1' }, t('concurrency_serial')),
@@ -311,7 +343,7 @@ window.__ModuleLoader__.load({
                 disabled: busyStarting,
                 style: styles.primary,
               }, busyStarting ? t('starting') : t('start'))),
-          h('p', { style: styles.cost }, t('cost'))),
+          h('p', { style: styles.cost }, t(kind === 'pelican' ? 'cost_pelican' : 'cost'))),
         error !== undefined && h('div', { role: 'alert', style: styles.error }, error),
         h(ResultView, { t, snapshot }),
         h(HistoryView, { t, history, excludeRunId: snapshot?.runId }),
@@ -338,6 +370,8 @@ window.__ModuleLoader__.load({
             result !== undefined && h('div', { style: { padding: '0 10px 10px' } },
               result.predictionName !== undefined && h('div', { style: { ...styles.predictionName, fontSize: 16 } }, result.predictionName),
               result.error !== undefined && h('div', { style: { ...styles.verdictSub, color: 'var(--dsw-alias-state-error-primary)' } }, result.error),
+              result.htmlPath !== undefined && h('div', { style: { ...styles.verdictSub, wordBreak: 'break-all' } }, `${t('pelican_saved')}: ${result.htmlPath}`),
+              result.html !== undefined && h('iframe', { title: `pelican ${run.runId}`, sandbox: 'allow-scripts', srcDoc: result.html, style: { ...styles.previewFrame, height: 260, marginTop: 6 } }),
               (result.candidates ?? []).slice(0, 3).map((candidate, index) => h('div', {
                 key: candidate.model, style: { ...styles.verdictSub, display: 'flex', justifyContent: 'space-between', marginTop: 2 },
               },
@@ -361,12 +395,14 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
       unscorable: 'var(--dsw-alias-label-tertiary)',
       not_model: 'var(--dsw-alias-label-tertiary)',
       error: 'var(--dsw-alias-state-error-primary)',
+      pelican: 'var(--dsw-alias-state-success-secondary)',
     }
 
     function ResultView({ t, snapshot }) {
       if (snapshot === undefined || snapshot.state === 'idle') {
         return h('p', { style: styles.hint }, t('idle_hint'))
       }
+      if (snapshot.kind === 'pelican') return h(PelicanView, { t, snapshot })
       const children = [h('style', { key: 'llmdet-css' }, STYLE_SHEET)]
       const running = ACTIVE_STATES.has(snapshot.state)
       if (running) {
@@ -428,6 +464,35 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
 
     function SectionTitle(text) {
       return h('h3', { style: styles.sectionTitle }, text)
+    }
+
+    // Pelican runs have their own result shape: artifact path + live iframe.
+    // Untrusted model output: sandboxed scripts, no same-origin.
+    function PelicanView({ t, snapshot }) {
+      const result = snapshot.result
+      if (ACTIVE_STATES.has(snapshot.state)) {
+        return h('section', { 'aria-live': 'polite' },
+          h('style', { key: 'llmdet-css' }, STYLE_SHEET),
+          h('div', { 'aria-live': 'polite', style: styles.running },
+            h('span', { style: styles.runningDot }),
+            h('span', null, t('phase_generating'))))
+      }
+      const children = [
+        h('div', { style: styles.verdictCard },
+          h('span', {
+            style: { ...styles.verdictTone, background: snapshot.state === 'completed' ? DECISION_TONE.pelican : DECISION_TONE.error },
+          }, snapshot.state === 'completed' ? t('decision_pelican') : t(snapshot.state)),
+          result?.error !== undefined && h('div', { style: { ...styles.verdictSub, color: 'var(--dsw-alias-state-error-primary)' } }, result.error),
+          snapshot.state === 'completed' && h('div', { style: styles.verdictSub },
+            `${t('configured_model')}: ${snapshot.model}${snapshot.provider === undefined ? '' : ` · ${snapshot.provider}`}`),
+          result?.htmlPath !== undefined && h('div', { style: { ...styles.verdictSub, wordBreak: 'break-all' } }, `${t('pelican_saved')}: ${result.htmlPath}`),
+          result?.usage !== undefined && h('div', { style: styles.usageLine }, `${t('usage')}: ${formatUsage(result.usage)}`)),
+      ]
+      if (result?.html !== undefined) {
+        children.push(h('div', { style: styles.block }, SectionTitle(t('pelican_preview'))))
+        children.push(h('iframe', { title: 'pelican-preview', sandbox: 'allow-scripts', srcDoc: result.html, style: styles.previewFrame }))
+      }
+      return h('section', { 'aria-live': 'polite' }, ...children)
     }
 
     function VerdictBody({ t, snapshot }) {
@@ -506,6 +571,7 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
       usageLine: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
       method: { marginTop: 4, color: 'var(--dsw-alias-label-secondary)' },
       settingsEntry: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)' },
+      previewFrame: { width: '100%', height: 380, border: '1px solid var(--dsw-alias-border-l)', borderRadius: 10, background: '#fff', display: 'block' },
     }
 
     // Data layer over the mounted llmDetector namespace. `ctx.remote.llmDetector`
