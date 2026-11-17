@@ -59,9 +59,11 @@ window.__ModuleLoader__.load({
       start_failed: '启动失败',
       error: '错误',
       raw_reply: '原始回复',
-      kind_label: '检测类型',
-      kind_lmfpd: 'LMFPD 计数挑战',
+      kind_label: '测试项',
+      kind_lmfpd: 'LMFPD 指纹测试',
       kind_pelican: '鹈鹕绘画测试',
+      queue_remaining: '队列中还有 {count} 项测试',
+      cost_none: '请至少选择一项测试。',
       intro_pelican: '让模型直接生成 SVG 鹈鹕骑自行车的 2D 动画页面，检验空间想象与代码构造能力；HTML 保存在插件目录的 pelican/ 下，并在下方实时预览。',
       cost_pelican: '开始后将向该模型发送 1 个请求，可能产生 token 费用。',
       phase_generating: '生成鹈鹕动画…',
@@ -115,9 +117,11 @@ window.__ModuleLoader__.load({
       start_failed: 'Start failed',
       error: 'Error',
       raw_reply: 'Raw reply',
-      kind_label: 'Test kind',
-      kind_lmfpd: 'LMFPD counting challenges',
+      kind_label: 'Test items',
+      kind_lmfpd: 'LMFPD fingerprint test',
       kind_pelican: 'Pelican drawing test',
+      queue_remaining: '{count} test(s) remaining in queue',
+      cost_none: 'Select at least one test.',
       intro_pelican: 'Asks the model to generate an SVG pelican-riding-a-bicycle 2D animation page to probe spatial imagination and code construction; the HTML is saved under the plugin pelican/ dir and previewed live below.',
       cost_pelican: 'Starting sends 1 request to the model and may incur token cost.',
       phase_generating: 'Generating the pelican animation…',
@@ -215,13 +219,21 @@ window.__ModuleLoader__.load({
         setRouteKeyState(value)
       }
       const [concurrency, setConcurrency] = useState(1)
-      const [kind, setKindState] = useState(() => {
-        try { return localStorage.getItem(KIND_STORAGE_KEY) ?? 'lmfpd' } catch { return 'lmfpd' }
+      // Selected test kinds, persisted; server runs them one kind per run,
+      // so "both" chains two runs client-side (single-run slot respected).
+      const [kinds, setKindsState] = useState(() => {
+        try {
+          const raw = localStorage.getItem(KIND_STORAGE_KEY)
+          const list = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw).filter(k => k === 'lmfpd' || k === 'pelican') : ['lmfpd']
+          return list.length === 0 ? ['lmfpd'] : [...new Set(list)].sort()
+        } catch { return ['lmfpd'] }
       })
-      const setKind = (value) => {
-        try { localStorage.setItem(KIND_STORAGE_KEY, value) } catch { }
-        setKindState(value)
+      const toggleKind = (kind, on) => {
+        const next = (on ? [...kinds, kind] : kinds.filter(k => k !== kind)).sort()
+        try { localStorage.setItem(KIND_STORAGE_KEY, JSON.stringify(next)) } catch { }
+        setKindsState(next)
       }
+      const [queue, setQueue] = useState([])
       const [routes, setRoutes] = useState(undefined)
       const [snapshot, setSnapshot] = useState(undefined)
       const [busyStarting, setBusyStarting] = useState(false)
@@ -241,6 +253,7 @@ window.__ModuleLoader__.load({
           setSnapshot(result.value)
           setError(undefined)
           setOffline(false)
+          return result.value
         } catch {
           setOffline(true)
         } finally {
@@ -294,16 +307,28 @@ window.__ModuleLoader__.load({
         setError(undefined)
         try {
           const [provider, model] = routeKey === '' ? ['', ''] : routeKey.split('|')
-          const result = await api.start({ provider, model, kind, concurrency })
-          if (!result.ok) {
-            const issue = result.error.details?.issues?.[0]
-            setError(issue?.code === 'busy' ? t('busy') : `${t('start_failed')}: ${result.error.message}`)
-            return
+          // One kind per run: chain the selected kinds sequentially, stop the
+          // queue when a run fails or is cancelled.
+          for (let i = 0; i < kinds.length; i++) {
+            setQueue(kinds.slice(i + 1))
+            const result = await api.start({ provider, model, kind: kinds[i], concurrency })
+            if (!result.ok) {
+              const issue = result.error.details?.issues?.[0]
+              setError(issue?.code === 'busy' ? t('busy') : `${t('start_failed')}: ${result.error.message}`)
+              return
+            }
+            let snap
+            for (;;) {
+              snap = await refresh(result.value.runId)
+              if (snap !== undefined && !ACTIVE_STATES.has(snap.state)) break
+              await new Promise(resolve => setTimeout(resolve, 1000))
+            }
+            if (snap.state === 'failed' || snap.state === 'cancelled') break
           }
-          await refresh(result.value.runId)
         } catch {
           setOffline(true)
         } finally {
+          setQueue([])
           setBusyStarting(false)
         }
       }
@@ -320,17 +345,18 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.page },
         h('h2', { style: styles.title }, t('title')),
         offline && h('div', { role: 'alert', style: styles.offline }, t('offline')),
-        h('p', { style: styles.intro }, kind === 'pelican' ? t('intro_pelican') : t('intro')),
+        h('p', { style: styles.intro }, kinds.includes('lmfpd') && kinds.includes('pelican') ? `${t('intro')} ${t('intro_pelican')}` : kinds.includes('pelican') ? t('intro_pelican') : t('intro')),
         h('div', { style: styles.form },
-          h('label', { style: styles.field },
+          h('div', { style: styles.field },
             h('span', null, t('kind_label')),
-            h('select', { value: kind, onChange: e => setKind(e.target.value), style: styles.input, disabled: active },
-              h('option', { value: 'lmfpd' }, t('kind_lmfpd')),
-              h('option', { value: 'pelican' }, t('kind_pelican')))),
+            h('div', { style: styles.checkRow },
+              ['lmfpd', 'pelican'].map(kind => h('label', { key: kind, style: styles.check },
+                h('input', { type: 'checkbox', checked: kinds.includes(kind), disabled: active, onChange: e => toggleKind(kind, e.target.checked) }),
+                t(`kind_${kind}`))))),
           h('label', { style: styles.field },
             h('span', null, t('choose_model')),
             h('select', { value: routeKey, onChange: e => setRouteKey(e.target.value), style: styles.input, disabled: active }, ...options)),
-          kind !== 'pelican' && h('label', { style: styles.field },
+          kinds.includes('lmfpd') && h('label', { style: styles.field },
             h('span', null, t('concurrency')),
             h('select', { value: String(concurrency), onChange: e => setConcurrency(Number(e.target.value)), style: styles.input, disabled: active },
               h('option', { value: '1' }, t('concurrency_serial')),
@@ -340,12 +366,12 @@ window.__ModuleLoader__.load({
               ? h('button', { onClick: () => { void cancel() }, style: styles.secondary }, t('cancel'))
               : h('button', {
                 onClick: () => { void start() },
-                disabled: busyStarting,
+                disabled: busyStarting || kinds.length === 0,
                 style: styles.primary,
               }, busyStarting ? t('starting') : t('start'))),
-          h('p', { style: styles.cost }, t(kind === 'pelican' ? 'cost_pelican' : 'cost'))),
+          h('p', { style: styles.cost }, kinds.length === 0 ? t('cost_none') : [kinds.includes('lmfpd') ? t('cost') : undefined, kinds.includes('pelican') ? t('cost_pelican') : undefined].filter(Boolean).join(' '))),
         error !== undefined && h('div', { role: 'alert', style: styles.error }, error),
-        h(ResultView, { t, snapshot }),
+        h(ResultView, { t, snapshot, remaining: queue.length }),
         h(HistoryView, { t, history, excludeRunId: snapshot?.runId }),
       )
     }
@@ -398,11 +424,11 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
       pelican: 'var(--dsw-alias-state-success-secondary)',
     }
 
-    function ResultView({ t, snapshot }) {
+    function ResultView({ t, snapshot, remaining: remainingProp = 0 }) {
       if (snapshot === undefined || snapshot.state === 'idle') {
         return h('p', { style: styles.hint }, t('idle_hint'))
       }
-      if (snapshot.kind === 'pelican') return h(PelicanView, { t, snapshot })
+      if (snapshot.kind === 'pelican') return h(PelicanView, { t, snapshot, remaining: remainingProp })
       const children = [h('style', { key: 'llmdet-css' }, STYLE_SHEET)]
       const running = ACTIVE_STATES.has(snapshot.state)
       if (running) {
@@ -412,7 +438,8 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
             ? t('phase_loading_data')
             : snapshot.state === 'sampling'
               ? t('phase_sampling').replace('{index}', String(snapshot.questionIndex ?? ''))
-              : t('phase_analyzing'))))
+              : t('phase_analyzing'),
+            remainingProp > 0 ? ` · ${t('queue_remaining').replace('{count}', String(remainingProp))}` : '')))
         return h('section', { 'aria-live': 'polite' }, ...children)
       }
       children.push(h('div', { style: styles.verdictCard }, VerdictBody({ t, snapshot })))
@@ -468,14 +495,14 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
 
     // Pelican runs have their own result shape: artifact path + live iframe.
     // Untrusted model output: sandboxed scripts, no same-origin.
-    function PelicanView({ t, snapshot }) {
+    function PelicanView({ t, snapshot, remaining = 0 }) {
       const result = snapshot.result
       if (ACTIVE_STATES.has(snapshot.state)) {
         return h('section', { 'aria-live': 'polite' },
           h('style', { key: 'llmdet-css' }, STYLE_SHEET),
           h('div', { 'aria-live': 'polite', style: styles.running },
             h('span', { style: styles.runningDot }),
-            h('span', null, t('phase_generating'))))
+            h('span', null, t('phase_generating'), remaining > 0 ? ` · ${t('queue_remaining').replace('{count}', String(remaining))}` : '')))
       }
       const children = [
         h('div', { style: styles.verdictCard },
@@ -572,6 +599,8 @@ summary::-webkit-details-marker { display: none } summary { list-style: none }
       method: { marginTop: 4, color: 'var(--dsw-alias-label-secondary)' },
       settingsEntry: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--dsw-alias-border-l)' },
       previewFrame: { width: '100%', height: 380, border: '1px solid var(--dsw-alias-border-l)', borderRadius: 10, background: '#fff', display: 'block' },
+      checkRow: { display: 'flex', gap: 18, flexWrap: 'wrap' },
+      check: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
     }
 
     // Data layer over the mounted llmDetector namespace. `ctx.remote.llmDetector`
