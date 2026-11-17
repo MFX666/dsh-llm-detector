@@ -378,7 +378,9 @@ window.__ModuleLoader__.load({
 
     function HistoryView({ t, history, excludeRunId }) {
       if (history === undefined) return null
-      const runs = history.filter(run => run.runId !== excludeRunId)
+      // Pelican runs stay listed even as the current snapshot: the preview in
+      // history is the artifact's home; the top card is just the verdict.
+      const runs = history.filter(run => run.runId !== excludeRunId || run.kind === 'pelican')
       if (runs.length === 0) return null
       return h('div', { style: styles.block },
         SectionTitle(t('history')),
